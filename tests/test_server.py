@@ -1,0 +1,260 @@
+import asyncio
+import json
+
+import pytest
+from mcp.server.mcpserver.exceptions import ToolError
+
+from .conftest import PERSONAL_PROGRAM, PERSONAL_TEAM, personal_details, url
+
+
+def call(tools, name, args):
+    """Invoke a tool through the MCP server, like a real client would."""
+    result = asyncio.run(tools.mcp.call_tool(name, args))
+    return result
+
+
+def test_all_tools_registered(tools):
+    names = {t.name for t in asyncio.run(tools.mcp.list_tools())}
+    assert {
+        "get_workout_history",
+        "get_workout",
+        "search_exercises",
+        "create_workout",
+        "set_prescription",
+        "update_block",
+        "delete_session",
+    } <= names
+
+
+def test_search_exercises_matches_all_words(tools, httpx_mock):
+    httpx_mock.add_response(
+        url=url("/v5/users/exercises"),
+        json=[
+            {
+                "id": 1,
+                "title": "Trap Bar Deadlift",
+                "hasVideo": True,
+                "videoUrl": "v1",
+                "prescription": "Reps @ Weight (lb)",
+            },
+            {"id": 2, "title": "Deadlift", "hasVideo": True, "videoUrl": "v2"},
+            {"id": 3, "title": "Trap bar carry", "hasVideo": False, "videoUrl": ""},
+        ],
+    )
+    found = tools.search_exercises("bar trap")
+    assert [e["exercise_id"] for e in found] == [3, 1]
+    assert found[1] == {
+        "exercise_id": 1,
+        "title": "Trap Bar Deadlift",
+        "tracks": "Reps @ Weight (lb)",
+        "video_url": "v1",
+    }
+    assert [e["exercise_id"] for e in tools.search_exercises("trap", with_video_only=True)] == [1]
+
+
+def test_history_learns_personal_team(tools, httpx_mock, client):
+    httpx_mock.add_response(url=url("/3.0/athlete/programworkout/range"), json=[personal_details()])
+    rows = tools.get_workout_history("2026-10-19", "2026-10-25")
+    assert rows[0]["program_workout_id"] == 10
+    assert client.personal_team_id == PERSONAL_TEAM
+
+
+def test_get_workout_falls_back_through_teams(tools, httpx_mock, client):
+    # Personal team is tried first, the session belongs to the coach team.
+    httpx_mock.add_response(
+        url=url(f"/v5/programWorkouts/10/teams/{PERSONAL_TEAM}"), status_code=401
+    )
+    coach_session = {**personal_details(), "program_id": 600, "team_id": 500, "personal_cal": False}
+    httpx_mock.add_response(url=url("/v5/programWorkouts/10/teams/500"), json=coach_session)
+    client.remember_team(PERSONAL_PROGRAM, PERSONAL_TEAM, personal=True)
+
+    result = tools.get_workout(10)
+    assert result["title"] == "Strength 1.1"
+    assert result["blocks"][0]["exercises"][0]["prescribed"] == "3 x 8 @ 30, 35, 40 kg"
+    assert client.candidate_teams(600)[0] == 500
+
+
+def test_set_prescription_posts_full_object(tools, httpx_mock):
+    httpx_mock.add_response(
+        url=url(f"/v5/programWorkouts/10/teams/{PERSONAL_TEAM}"), json=personal_details()
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=url("/2.0/coach/calendar/saveWorkoutSetExercises"),
+        json=[
+            {
+                "id": 101,
+                "title": "Trap Bar Deadlift",
+                "abr": "4 x 5 @ 88.18 lb",
+                "instruction": "heavy",
+            }
+        ],
+    )
+    out = tools.set_prescription(
+        10, 101, sets=4, reps=5, weight_kg=40, instruction="heavy", team_id=PERSONAL_TEAM
+    )
+    assert out["prescribed"] == "4 x 5 @ 40 kg"
+    body = json.loads(
+        httpx_mock.get_requests(url=url("/2.0/coach/calendar/saveWorkoutSetExercises"))[0].content
+    )
+    assert body[0]["id"] == 101 and body[0]["param_count"] == 4
+    assert body[0]["param_2_data_4"] == "88.18" and body[0]["param_2_data_5"] == ""
+
+
+def test_set_prescription_validation_error_reaches_client(tools, httpx_mock):
+    httpx_mock.add_response(
+        url=url(f"/v5/programWorkouts/10/teams/{PERSONAL_TEAM}"), json=personal_details()
+    )
+    # ToolError (unlike an unexpected crash) carries its message to the model.
+    with pytest.raises(ToolError, match="Bird Dog tracks reps; cannot set weight_kg"):
+        call(
+            tools,
+            "set_prescription",
+            {
+                "program_workout_id": 10,
+                "workout_set_exercise_id": 102,
+                "reps": 10,
+                "weight_kg": 5,
+                "team_id": PERSONAL_TEAM,
+            },
+        )
+
+
+def _mock_create(httpx_mock, exercises: int = 2):
+    httpx_mock.add_response(
+        method="POST",
+        url=url("/v5/programWorkouts/personal"),
+        json={
+            "programWorkout": {
+                "id": 10,
+                "programId": PERSONAL_PROGRAM,
+                "date": "2026-10-21",
+                "workoutId": 20,
+            },
+            "savedWorkout": {"id": 30, "group_id": PERSONAL_TEAM},
+        },
+    )
+    httpx_mock.add_response(
+        method="PUT",
+        url=url("/3.0/coach/workout/20"),
+        json={"title": "Strength 1.1", "instruction": "Easy week"},
+    )
+    httpx_mock.add_response(
+        method="PUT",
+        url=url("/v5/personalCalendar/workouts/20/addExercises"),
+        json=[
+            {
+                "workoutSetId": 201,
+                "savedWorkoutSetExercises": [
+                    {
+                        "workoutSetExerciseId": 101,
+                        "exerciseId": 68077,
+                        "title": "Trap Bar Deadlift",
+                        "videoURL": "https://youtu.be/68077",
+                    }
+                ],
+            },
+            {
+                "workoutSetId": 202,
+                "savedWorkoutSetExercises": [
+                    {
+                        "workoutSetExerciseId": 102,
+                        "exerciseId": 3870,
+                        "title": "Bird Dog",
+                        "videoURL": "https://youtu.be/3870",
+                    }
+                ],
+            },
+        ][:exercises],
+    )
+
+
+def test_create_workout_end_to_end(tools, httpx_mock):
+    _mock_create(httpx_mock)
+    httpx_mock.add_response(
+        url=url(f"/v5/programWorkouts/10/teams/{PERSONAL_TEAM}"),
+        json=personal_details(),
+        is_reusable=True,
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=url("/2.0/coach/calendar/saveWorkoutSetExercises"),
+        json=[{}],
+        is_reusable=True,
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=url("/2.0/coach/calendar/workout/workoutSet/save/202"),
+        json={"title": "Core", "instruction": "slow"},
+    )
+
+    result = call(
+        tools,
+        "create_workout",
+        {
+            "date": "2026-10-21",
+            "title": "Strength 1.1",
+            "instruction": "Easy week",
+            "exercises": [
+                {"exercise_id": 68077, "reps": 8, "weight_kg": [30, 35, 40], "instruction": "ramp"},
+                {
+                    "exercise_id": 3870,
+                    "sets": 2,
+                    "reps": 8,
+                    "instruction": "per side",
+                    "block_title": "Core",
+                    "block_instruction": "slow",
+                },
+            ],
+        },
+    )
+
+    assert result is not None
+    saves = httpx_mock.get_requests(url=url("/2.0/coach/calendar/saveWorkoutSetExercises"))
+    assert [json.loads(r.content)[0]["id"] for r in saves] == [101, 102]
+    block = json.loads(
+        httpx_mock.get_requests(url=url("/2.0/coach/calendar/workout/workoutSet/save/202"))[
+            0
+        ].content
+    )
+    assert block["title"] == "Core" and block["instruction"] == "slow"
+    assert not httpx_mock.get_requests(method="DELETE")
+
+
+def test_create_workout_rolls_back_on_failure(tools, httpx_mock):
+    _mock_create(httpx_mock, exercises=1)
+    httpx_mock.add_response(
+        url=url(f"/v5/programWorkouts/10/teams/{PERSONAL_TEAM}"), json=personal_details()
+    )
+    httpx_mock.add_response(
+        method="POST", url=url("/2.0/coach/calendar/saveWorkoutSetExercises"), status_code=500
+    )
+    httpx_mock.add_response(
+        method="DELETE", url=url("/v5/programWorkouts/10"), text="Program Workout deleted"
+    )
+    with pytest.raises(ToolError, match="failed with 500"):
+        tools.create_workout(
+            "2026-10-21",
+            "Strength 1.1",
+            [tools.PlannedExercise(exercise_id=68077, reps=8, weight_kg=30)],
+        )
+    assert httpx_mock.get_requests(method="DELETE")
+
+
+def test_submit_survey_resolves_answer_id(tools, httpx_mock):
+    from .conftest import survey
+
+    surveys_url = url("/3.0/athlete/savedworkout/surveys")
+    httpx_mock.add_response(url=surveys_url, json={"30": survey()})
+    httpx_mock.add_response(
+        method="POST", url=url("/3.0/athlete/survey/question/10"), json={"id": 1}
+    )
+    httpx_mock.add_response(url=surveys_url, json={"30": survey([41])})
+
+    out = call(tools, "submit_survey", {"saved_workout_id": 30, "question": "energy", "score": 4})
+
+    body = json.loads(
+        httpx_mock.get_requests(url=url("/3.0/athlete/survey/question/10"))[0].content
+    )
+    assert body == {"saved_workout_id": 30, "survey_question_answer_id": 41}
+    assert out is not None
