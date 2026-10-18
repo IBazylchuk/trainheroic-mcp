@@ -175,3 +175,13 @@ def test_survey_answers_map_to_scores_and_back():
     }
     with pytest.raises(ValueError, match="no question 'hunger'"):
         w.survey_answer_id(survey(), "hunger", 3)
+
+
+def test_new_set_exercise_is_posted_without_id():
+    entry = {"id": 1971, "title": "Lat Pulldown", "param1Type": 3, "param2Type": 1}
+    current = w.new_set_exercise(entry, block_id=201, order=2)
+    payload = w.build_prescription(current, reps=10, weight_kg=[25, 30, 30])
+    assert "id" not in payload
+    assert payload["workout_set_id"] == 201 and payload["order"] == 2
+    assert payload["exercise_id"] == 1971 and payload["reference_max_exercise_id"] == 1971
+    assert w.describe_prescription(payload) == "3 x 10 @ 25, 30, 30 kg"

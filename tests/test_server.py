@@ -258,3 +258,95 @@ def test_submit_survey_resolves_answer_id(tools, httpx_mock):
     )
     assert body == {"saved_workout_id": 30, "survey_question_answer_id": 41}
     assert out is not None
+
+
+LIBRARY = [
+    {"id": 68077, "title": "Trap Bar Deadlift", "param1Type": 3, "param2Type": 1},
+    {"id": 3870, "title": "Bird Dog", "param1Type": 3, "param2Type": None},
+    {
+        "id": 1971,
+        "title": "Lat Pulldown",
+        "param1Type": 3,
+        "param2Type": 1,
+        "videoUrl": "https://youtu.be/1971",
+    },
+]
+
+
+def test_create_workout_groups_supersets_into_one_block(tools, httpx_mock):
+    _mock_create(httpx_mock)
+    httpx_mock.add_response(url=url("/v5/users/exercises"), json=LIBRARY)
+    httpx_mock.add_response(
+        url=url(f"/v5/programWorkouts/10/teams/{PERSONAL_TEAM}"),
+        json=personal_details(),
+        is_reusable=True,
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=url("/2.0/coach/calendar/saveWorkoutSetExercises"),
+        json=[{"id": 555, "title": "Lat Pulldown", "video_url": "https://youtu.be/1971"}],
+        is_reusable=True,
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=url("/2.0/coach/calendar/workout/workoutSet/save/201"),
+        json={"title": "A"},
+    )
+
+    result = tools.create_workout(
+        "2026-10-21",
+        "Strength 1.1",
+        [
+            tools.PlannedExercise(exercise_id=68077, reps=8, weight_kg=30, superset="A"),
+            tools.PlannedExercise(exercise_id=3870, sets=2, reps=8),
+            tools.PlannedExercise(exercise_id=1971, reps=10, weight_kg=[25, 30, 30], superset="A"),
+        ],
+    )
+
+    added = json.loads(
+        httpx_mock.get_requests(url=url("/v5/personalCalendar/workouts/20/addExercises"))[0].content
+    )
+    assert [e["exerciseId"] for e in added["exercises"]] == [68077, 3870]
+    saves = [
+        json.loads(r.content)[0]
+        for r in httpx_mock.get_requests(url=url("/2.0/coach/calendar/saveWorkoutSetExercises"))
+    ]
+    member = next(s for s in saves if s["exercise_id"] == 1971)
+    assert "id" not in member and member["workout_set_id"] == 201 and member["order"] == 2
+    assert member["param_2_data_2"] == "66.14"
+    block = json.loads(
+        httpx_mock.get_requests(url=url("/2.0/coach/calendar/workout/workoutSet/save/201"))[
+            0
+        ].content
+    )
+    assert block["title"] == "A"
+    assert result["blocks"][0]["title"] == "A"
+    # Reads lag behind writes, so the result reports the saved prescription.
+    assert result["blocks"][0]["exercises"][0]["prescribed"] == "1 x 8 @ 30 kg"
+
+
+def test_add_to_block_appends_after_existing_exercises(tools, httpx_mock):
+    httpx_mock.add_response(url=url("/v5/users/exercises"), json=LIBRARY)
+    httpx_mock.add_response(
+        url=url(f"/v5/programWorkouts/10/teams/{PERSONAL_TEAM}"), json=personal_details()
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=url("/2.0/coach/calendar/saveWorkoutSetExercises"),
+        json=[{"id": 777, "title": "Lat Pulldown", "video_url": "https://youtu.be/1971"}],
+    )
+    out = tools.add_to_block(10, 201, [1971], team_id=PERSONAL_TEAM)
+    assert out == [
+        {
+            "block_id": 201,
+            "workout_set_exercise_id": 777,
+            "exercise_id": 1971,
+            "title": "Lat Pulldown",
+            "prescribed": "1 set",
+            "video_url": "https://youtu.be/1971",
+        }
+    ]
+    body = json.loads(
+        httpx_mock.get_requests(url=url("/2.0/coach/calendar/saveWorkoutSetExercises"))[0].content
+    )
+    assert body[0]["order"] == 2 and "id" not in body[0]

@@ -28,14 +28,19 @@ get_workout shows one session with its blocks, exercises, prescriptions, results
 and exercise videos; get_set_exercise gives per-set values for one exercise.
 
 Planning: create_workout builds a complete personal session in one call (title,
-notes, exercises, sets/reps/weight, block notes). For edits use create_session,
-add_exercises, set_prescription, update_session, update_block and delete_session.
+notes, exercises, sets/reps/weight, block notes). Exercises that share a
+`superset` label go into one block, which is how TrainHeroic shows a superset.
+For edits use create_session, add_exercises, add_to_block, set_prescription,
+update_session, update_block and delete_session.
 Find exercise ids with search_exercises; every library exercise carries its own
 video and technique notes, which appear automatically in the athlete's app.
 
 Weights are always given in kilograms here; the server converts to the units the
 API stores. Coach-assigned programs whose license has expired are not visible.
 """
+
+SAVE_SET_EXERCISES = "/2.0/coach/calendar/saveWorkoutSetExercises"
+SAVE_BLOCK = "/2.0/coach/calendar/workout/workoutSet/save/{block_id}"
 
 mcp = MCPServer("trainheroic", instructions=INSTRUCTIONS, version=__version__)
 
@@ -184,6 +189,10 @@ def search_exercises(
 @tool
 def get_exercise(exercise_id: int) -> dict:
     """Full library entry for one exercise: technique notes, video, tracked params."""
+    return _library_entry(exercise_id)
+
+
+def _library_entry(exercise_id: int) -> dict:
     for e in api().exercise_library():
         if e.get("id") == exercise_id:
             return e
@@ -433,7 +442,7 @@ def set_prescription(
         rpe=rpe,
         calories=calories,
     )
-    client.post("/2.0/coach/calendar/saveWorkoutSetExercises", [payload])
+    client.post(SAVE_SET_EXERCISES, [payload])
     return {
         "workout_set_exercise_id": workout_set_exercise_id,
         "title": current.get("title"),
@@ -471,7 +480,7 @@ def update_block(
     """Rename a block and/or set its instruction (e.g. warm-up circuit, rest times)."""
     _, details = _fetch_details(program_workout_id, team_id)
     payload = w.build_block(w.find_block(details, block_id), title=title, instruction=instruction)
-    saved = api().post(f"/2.0/coach/calendar/workout/workoutSet/save/{block_id}", payload)
+    saved = api().post(SAVE_BLOCK.format(block_id=block_id), payload)
     return {
         "block_id": block_id,
         "title": saved.get("title"),
@@ -486,6 +495,45 @@ def delete_session(program_workout_id: int) -> dict:
     return {"program_workout_id": program_workout_id, "deleted": True, "message": message}
 
 
+def _insert_into_block(
+    block_id: int,
+    exercise_id: int,
+    order: int,
+    *,
+    sets: int | None = None,
+    instruction: str | None = None,
+    **targets: PerSet,
+) -> dict:
+    current = w.new_set_exercise(_library_entry(exercise_id), block_id, order)
+    payload = w.build_prescription(current, sets=sets, instruction=instruction, **targets)
+    saved = api().post(SAVE_SET_EXERCISES, [payload])
+    row = saved[0] if isinstance(saved, list) and saved else {}
+    return {
+        "block_id": block_id,
+        "workout_set_exercise_id": row.get("id"),
+        "exercise_id": exercise_id,
+        "title": row.get("title", current["title"]),
+        "prescribed": w.describe_prescription(payload),
+        "video_url": row.get("video_url") or None,
+    }
+
+
+@tool
+def add_to_block(
+    program_workout_id: int,
+    block_id: int,
+    exercise_ids: list[int],
+    team_id: int | None = None,
+) -> list[dict]:
+    """Append library exercises to an existing block, turning it into a superset.
+
+    Set their targets afterwards with set_prescription.
+    """
+    _, details = _fetch_details(program_workout_id, team_id)
+    order = len(w.find_block(details, block_id)["exercises"])
+    return [_insert_into_block(block_id, eid, order + i) for i, eid in enumerate(exercise_ids, 1)]
+
+
 class PlannedExercise(BaseModel):
     exercise_id: int = Field(description="Library exercise id (see search_exercises)")
     sets: int | None = Field(default=None, ge=1, le=10)
@@ -497,14 +545,36 @@ class PlannedExercise(BaseModel):
     rpe: PerSet = None
     calories: PerSet = None
     instruction: str | None = Field(default=None, description="Coaching cue for this exercise")
-    block_title: str | None = Field(default=None, description='e.g. "Warm-up", "A1", "Main lift"')
+    superset: str | None = Field(
+        default=None,
+        description='Exercises with the same label share one block (a superset), e.g. "A"',
+    )
+    block_title: str | None = Field(
+        default=None, description='e.g. "Warm-up", "Main lift"; defaults to the superset label'
+    )
     block_instruction: str | None = None
 
     def targets(self) -> dict[str, PerSet]:
         return {
             k: getattr(self, k)
             for k in ("reps", "weight_kg", "percent", "seconds", "meters", "rpe", "calories")
+            if getattr(self, k) is not None
         }
+
+
+def _group_blocks(exercises: list[PlannedExercise]) -> list[list[PlannedExercise]]:
+    """One group per block, in order of first appearance; superset labels merge."""
+    groups: list[list[PlannedExercise]] = []
+    by_label: dict[str, list[PlannedExercise]] = {}
+    for spec in exercises:
+        if spec.superset is None:
+            groups.append([spec])
+        elif spec.superset in by_label:
+            by_label[spec.superset].append(spec)
+        else:
+            by_label[spec.superset] = [spec]
+            groups.append(by_label[spec.superset])
+    return groups
 
 
 @tool
@@ -516,37 +586,67 @@ def create_workout(
 ) -> dict:
     """Create a complete personal session in one call.
 
-    Each exercise goes into its own block with its prescription, cue and optional
-    block title/instruction. If any step fails the half-built session is deleted.
+    Exercises go into blocks in the given order, each with its prescription and
+    cue. Exercises sharing a `superset` label are placed together in one block.
+    If any step fails the half-built session is deleted.
     """
     client = api()
+    groups = _group_blocks(exercises)
     session = create_session(date, title=title, instruction=instruction)
+    block_labels: dict[int, tuple[str | None, str | None]] = {}
+    prescribed: dict[int, str] = {}
     try:
-        added = add_exercises(session["workout_id"], [e.exercise_id for e in exercises])
-        if len(added) != len(exercises):
-            raise TrainHeroicError(f"Expected {len(exercises)} exercises, API added {len(added)}")
-        team_id = session["team_id"]
-        details = client.get(f"/v5/programWorkouts/{session['program_workout_id']}/teams/{team_id}")
-        for spec, ref in zip(exercises, added, strict=True):
-            targets = {k: v for k, v in spec.targets().items() if v is not None}
-            if targets or spec.sets or spec.instruction:
+        added = add_exercises(session["workout_id"], [g[0].exercise_id for g in groups])
+        if len(added) != len(groups):
+            raise TrainHeroicError(f"Expected {len(groups)} blocks, API added {len(added)}")
+        details = client.get(
+            f"/v5/programWorkouts/{session['program_workout_id']}/teams/{session['team_id']}"
+        )
+        for group, ref in zip(groups, added, strict=True):
+            block_id = int(ref["block_id"])
+            lead = group[0]
+            if lead.targets() or lead.sets or lead.instruction:
                 current = w.find_set_exercise(details, int(ref["workout_set_exercise_id"]))
                 payload = w.build_prescription(
-                    current, sets=spec.sets, instruction=spec.instruction, **targets
+                    current, sets=lead.sets, instruction=lead.instruction, **lead.targets()
                 )
-                client.post("/2.0/coach/calendar/saveWorkoutSetExercises", [payload])
-            if spec.block_title is not None or spec.block_instruction is not None:
+                client.post(SAVE_SET_EXERCISES, [payload])
+                prescribed[int(ref["workout_set_exercise_id"])] = w.describe_prescription(payload)
+            for order, spec in enumerate(group[1:], start=2):
+                member = _insert_into_block(
+                    block_id,
+                    spec.exercise_id,
+                    order,
+                    sets=spec.sets,
+                    instruction=spec.instruction,
+                    **spec.targets(),
+                )
+                if member["workout_set_exercise_id"]:
+                    prescribed[int(member["workout_set_exercise_id"])] = member["prescribed"]
+            block_title = next((e.block_title for e in group if e.block_title), lead.superset)
+            block_note = next((e.block_instruction for e in group if e.block_instruction), None)
+            if block_title is not None or block_note is not None:
                 block = w.build_block(
-                    w.find_block(details, int(ref["block_id"])),
-                    title=spec.block_title,
-                    instruction=spec.block_instruction,
+                    w.find_block(details, block_id), title=block_title, instruction=block_note
                 )
-                client.post(f"/2.0/coach/calendar/workout/workoutSet/save/{ref['block_id']}", block)
+                client.post(SAVE_BLOCK.format(block_id=block_id), block)
+                block_labels[block_id] = (block_title, block_note)
     except Exception:
         log.exception("create_workout failed; removing partial session")
         delete_session(session["program_workout_id"])
         raise
-    return get_workout(session["program_workout_id"], team_id=session["team_id"])
+    summary = get_workout(session["program_workout_id"], team_id=session["team_id"])
+    # Fresh edits take a moment to show up in reads (and briefly in lb); report
+    # what was saved instead.
+    for block in summary["blocks"]:
+        title_, note = block_labels.get(block["block_id"], (None, None))
+        if title_ is not None:
+            block["title"] = title_
+        if note is not None:
+            block["instruction"] = note
+        for ex in block["exercises"]:
+            ex["prescribed"] = prescribed.get(ex["workout_set_exercise_id"], ex["prescribed"])
+    return summary
 
 
 def main() -> None:

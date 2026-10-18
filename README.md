@@ -4,7 +4,7 @@ An unofficial [Model Context Protocol](https://modelcontextprotocol.io) server f
 [TrainHeroic](https://www.trainheroic.com). It lets Claude (or any MCP client) read
 your training history and **plan complete workouts on your personal calendar**:
 exercises from the TrainHeroic library (each with its video and technique notes),
-sets, reps, per-set weights, session notes and block instructions.
+sets, reps, per-set weights, supersets, session notes and block instructions.
 
 > **Unofficial.** TrainHeroic has no public API. This server talks to the same
 > endpoints the TrainHeroic apps use, so it can break whenever they change, and
@@ -30,8 +30,8 @@ sets, reps, per-set weights, session notes and block instructions.
 | | `search_circuits`, `get_recent_exercises`, `get_recent_circuits` | |
 | Performance | `get_exercise_stats`, `get_personal_records`, `get_working_max` | |
 | Feedback | `get_workout_surveys`, `submit_survey`, `get_workout_comments`, `get_workout_leaderboard`, `save_workout_feedback` | |
-| Planning | `create_workout` | Whole session in one call; rolls back if any step fails |
-| | `create_session`, `add_exercises`, `set_prescription` | Build or edit step by step |
+| Planning | `create_workout` | Whole session in one call, supersets included; rolls back if any step fails |
+| | `create_session`, `add_exercises`, `add_to_block`, `set_prescription` | Build or edit step by step; `add_to_block` turns a block into a superset |
 | | `update_session`, `update_block`, `delete_session` | Titles, notes, block instructions, removal |
 
 Weights are always passed **in kilograms**; the server converts to the pounds the
@@ -39,6 +39,20 @@ API stores and the app shows them in your preferred units. Targets can be one va
 for every set or a list with a value per set (`weight_kg: [30, 35, 40, 40]`). Only
 targets the exercise actually tracks are accepted, so a typo like weight on a
 bodyweight drill fails loudly instead of being dropped.
+
+### Supersets
+
+TrainHeroic has no separate superset object: a block that holds several exercises
+is a superset. In `create_workout`, give exercises the same `superset` label to put
+them in one block (the label becomes the block title unless `block_title` is set):
+
+```json
+[
+  {"exercise_id": 68077, "reps": 8, "weight_kg": [30, 35, 40], "superset": "A"},
+  {"exercise_id": 1971, "reps": 10, "weight_kg": 30, "superset": "A",
+   "block_instruction": "Alternate, rest 90 s after each pair"}
+]
+```
 
 ## Setup
 
@@ -103,8 +117,6 @@ and register the script instead: `claude mcp add trainheroic -- /path/to/script.
 - Only **personal calendar** sessions can be created or edited. Coach programs are
   read-only, and once a coach license expires TrainHeroic hides those sessions from
   the API entirely (use the app's data export for that history).
-- Each added exercise lands in its own block; grouping exercises into supersets is
-  not supported yet. Use block titles such as `A1` / `A2` instead.
 - Logging set results and marking a session complete happen in the TrainHeroic app;
   `save_workout_feedback` only stores notes, RPE and rating.
 - Reps must be whole numbers. Put "per side", tempo or rest cues in the exercise or

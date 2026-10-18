@@ -369,6 +369,8 @@ def build_prescription(
 
     count = resolve_set_count(sets, provided)
     payload = {k: current.get(k) for k in SET_EXERCISE_FIELDS}
+    if payload["id"] is None:
+        del payload["id"]  # posting without an id adds the exercise to the block
     payload["workout_set_id"] = current.get("set_id")
     payload["param_count"] = count
     payload["no_sets"] = 0
@@ -436,8 +438,30 @@ def describe_prescription(payload: dict) -> str:
         prefix = "RPE " if ptype is ParamType.RPE else ""
         parts.append(f"{prefix}{shown}{_SUFFIX.get(ptype, '')}")
     if not parts:
-        return f"{count} sets"
+        return f"{count} set" if count == 1 else f"{count} sets"
     return f"{count} x " + " @ ".join(parts)
+
+
+def new_set_exercise(library_entry: dict, block_id: int, order: int) -> dict:
+    """An unsaved set exercise for ``block_id``, shaped like the output of ``blocks``.
+
+    A block holding several exercises is how TrainHeroic represents a superset.
+    """
+    exercise_id = int(library_entry["id"])
+    return {
+        "id": None,
+        "set_id": block_id,
+        "exercise_id": exercise_id,
+        "order": order,
+        "title": library_entry.get("title"),
+        "instruction": "",
+        "no_sets": 0,
+        "param_1_type": library_entry.get("param1Type") or 0,
+        "param_2_type": library_entry.get("param2Type") or 0,
+        "param_count": 1,
+        "reference_max_exercise_id": exercise_id,
+        "workout_set_exercise_template_id": None,
+    }
 
 
 def build_block(current: dict, *, title: str | None, instruction: str | None) -> dict:
