@@ -273,6 +273,81 @@ def describe_set_exercise(details: dict, workout_set_exercise_id: int) -> dict:
     }
 
 
+# ── copying ──────────────────────────────────────────────────────────────────
+
+
+def _human_values(ex: dict, slot: int, ptype: ParamType, metric: bool) -> list[Any]:
+    """Per-set values of one parameter in the units the planning tools take."""
+    source, in_lb = (ex["template"], True) if ex["template"] else (ex["saved"], not metric)
+    count = min(to_int(ex.get("param_count")) or 0, MAX_SETS)
+    values = []
+    for i in range(1, count + 1):
+        raw = _clean(source.get(f"param_{slot}_data_{i}"))
+        if raw is not None and ptype is ParamType.WEIGHT and in_lb:
+            raw = lb_to_kg(float(raw))
+        values.append(raw)
+    return values
+
+
+def plan_from_details(details: dict) -> dict:
+    """The session as ``create_workout`` arguments: blocks, supersets, targets, notes.
+
+    Targets come from the coach/planner template when the API returns it, otherwise
+    from the athlete's copy (which holds logged values once sets are done).
+    """
+    metric = str(_saved_root(details).get("use_metric")) == "1"
+    exercises: list[dict] = []
+    for index, block in enumerate(blocks(details), start=1):
+        superset = f"block-{index}" if len(block["exercises"]) > 1 else None
+        for position, ex in enumerate(block["exercises"]):
+            spec: dict[str, Any] = {"exercise_id": ex["exercise_id"]}
+            if ex["instruction"]:
+                spec["instruction"] = ex["instruction"]
+            if superset:
+                spec["superset"] = superset
+            if position == 0:
+                spec["block_title"] = block.get("title")
+                if block["instruction"]:
+                    spec["block_instruction"] = block["instruction"]
+            if not _done(ex.get("no_sets")):
+                spec["sets"] = to_int(ex.get("param_count")) or 1
+                for slot in (1, 2):
+                    ptype = ParamType.parse(ex.get(f"param_{slot}_type"))
+                    if ptype is ParamType.NONE:
+                        continue
+                    values = _human_values(ex, slot, ptype, metric)
+                    if not any(v is not None for v in values):
+                        continue
+                    key = INPUT_FOR_TYPE.get(ptype)
+                    if key is None:
+                        raise ValueError(
+                            f"{ex['title']} tracks {ptype.name.lower()}, which cannot be copied yet"
+                        )
+                    spec[key] = ["" if v is None else v for v in values]
+            exercises.append(spec)
+    root = _saved_root(details)
+    workout = details.get("workout") or {}
+    return {
+        "title": workout.get("title") or details.get("workout_title") or root.get("title"),
+        "instruction": _clean(workout.get("instruction") or root.get("instruction")),
+        "exercises": exercises,
+    }
+
+
+def has_results(details: dict) -> bool:
+    """Whether any set, exercise or the session itself has been logged."""
+    if _done(_saved_root(details).get("completed")):
+        return True
+    for block in blocks(details):
+        for ex in block["exercises"]:
+            saved = ex["saved"]
+            if _done(saved.get("completed")) or _clean(saved.get("abr_results")):
+                return True
+            if any(_done(saved.get(f"param_{i}_made")) for i in range(1, MAX_SETS + 1)):
+                return True
+    return False
+
+
 # ── readiness surveys ────────────────────────────────────────────────────────
 
 

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
@@ -350,3 +351,71 @@ def test_add_to_block_appends_after_existing_exercises(tools, httpx_mock):
         httpx_mock.get_requests(url=url("/2.0/coach/calendar/saveWorkoutSetExercises"))[0].content
     )
     assert body[0]["order"] == 2 and "id" not in body[0]
+
+
+def _details_mock(httpx_mock, details=None, reusable=False):
+    httpx_mock.add_response(
+        url=url(f"/v5/programWorkouts/10/teams/{PERSONAL_TEAM}"),
+        json=details or personal_details(),
+        is_reusable=reusable,
+    )
+
+
+def test_remove_exercise_from_superset_deletes_only_that_exercise(tools, httpx_mock, client):
+    details = personal_details()
+    saved_blocks = details["summarizedSavedWorkout"]["saved_workout"]["workoutSets"]
+    saved_blocks[0]["workoutSetExercises"].append(saved_blocks.pop()["workoutSetExercises"][0])
+    del details["workout"]
+    client.remember_team(PERSONAL_PROGRAM, PERSONAL_TEAM, personal=True)
+    _details_mock(httpx_mock, details)
+    httpx_mock.add_response(
+        method="DELETE",
+        url=url("/2.0/coach/calendar/workout/workoutSetExercise/201/102"),
+        json={"id": 201},
+    )
+    assert tools.remove_exercise(10, 102) == {"removed_exercise": 102, "removed_block": None}
+
+
+def test_remove_last_exercise_removes_block(tools, httpx_mock, client):
+    client.remember_team(PERSONAL_PROGRAM, PERSONAL_TEAM, personal=True)
+    _details_mock(httpx_mock)
+    httpx_mock.add_response(
+        method="POST",
+        url=url("/2.0/coach/calendar/workout/workoutSet/delete/202"),
+        text="Workout Set Deleted",
+    )
+    assert tools.remove_exercise(10, 102) == {"removed_exercise": 102, "removed_block": 202}
+
+
+def test_move_refuses_sessions_with_results(tools, httpx_mock, client):
+    details = personal_details()
+    details["summarizedSavedWorkout"]["saved_workout"]["completed"] = "1"
+    client.remember_team(PERSONAL_PROGRAM, PERSONAL_TEAM, personal=True)
+    _details_mock(httpx_mock, details)
+    with pytest.raises(ToolError, match="already has logged results"):
+        tools.move_workout(10, "2026-10-24")
+    assert not httpx_mock.get_requests(method="DELETE")
+
+
+def test_copy_workout_recreates_plan(tools, httpx_mock, client):
+    client.remember_team(PERSONAL_PROGRAM, PERSONAL_TEAM, personal=True)
+    _details_mock(httpx_mock, reusable=True)  # source and the new session share the mock
+    _mock_create(httpx_mock)
+    httpx_mock.add_response(
+        method="POST",
+        url=url("/2.0/coach/calendar/saveWorkoutSetExercises"),
+        json=[{}],
+        is_reusable=True,
+    )
+    httpx_mock.add_response(
+        method="POST", url=re.compile(r".*/workoutSet/save/\d+$"), json={}, is_reusable=True
+    )
+    tools.copy_workout(10, "2026-10-28")
+    created = json.loads(
+        httpx_mock.get_requests(method="POST", url=url("/v5/programWorkouts/personal"))[0].content
+    )
+    assert created == {"date": "2026-10-28"}
+    lift = json.loads(
+        httpx_mock.get_requests(url=url("/2.0/coach/calendar/saveWorkoutSetExercises"))[0].content
+    )[0]
+    assert [lift[f"param_2_data_{i}"] for i in (1, 2, 3)] == ["66.14", "77.16", "88.18"]

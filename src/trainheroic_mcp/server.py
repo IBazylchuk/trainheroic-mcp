@@ -31,7 +31,9 @@ Planning: create_workout builds a complete personal session in one call (title,
 notes, exercises, sets/reps/weight, block notes). Exercises that share a
 `superset` label go into one block, which is how TrainHeroic shows a superset.
 For edits use create_session, add_exercises, add_to_block, set_prescription,
-update_session, update_block and delete_session.
+update_session, update_block, remove_exercise, remove_block and delete_session.
+copy_workout repeats a session's plan on another date (handy for the weeks of a
+block); move_workout reschedules a session that has no logged results yet.
 Find exercise ids with search_exercises; every library exercise carries its own
 video and technique notes, which appear automatically in the athlete's app.
 
@@ -41,6 +43,8 @@ API stores. Coach-assigned programs whose license has expired are not visible.
 
 SAVE_SET_EXERCISES = "/2.0/coach/calendar/saveWorkoutSetExercises"
 SAVE_BLOCK = "/2.0/coach/calendar/workout/workoutSet/save/{block_id}"
+DELETE_BLOCK = "/2.0/coach/calendar/workout/workoutSet/delete/{block_id}"
+DELETE_SET_EXERCISE = "/2.0/coach/calendar/workout/workoutSetExercise/{block_id}/{wse_id}"
 
 mcp = MCPServer("trainheroic", instructions=INSTRUCTIONS, version=__version__)
 
@@ -647,6 +651,70 @@ def create_workout(
         for ex in block["exercises"]:
             ex["prescribed"] = prescribed.get(ex["workout_set_exercise_id"], ex["prescribed"])
     return summary
+
+
+@tool
+def remove_exercise(
+    program_workout_id: int, workout_set_exercise_id: int, team_id: int | None = None
+) -> dict:
+    """Remove one exercise from a session; a block left empty is removed too."""
+    _, details = _fetch_details(program_workout_id, team_id)
+    for block in w.blocks(details):
+        if any(ex["id"] == workout_set_exercise_id for ex in block["exercises"]):
+            if len(block["exercises"]) == 1:
+                api().post(DELETE_BLOCK.format(block_id=block["id"]))
+                return {"removed_exercise": workout_set_exercise_id, "removed_block": block["id"]}
+            api().delete(
+                DELETE_SET_EXERCISE.format(block_id=block["id"], wse_id=workout_set_exercise_id)
+            )
+            return {"removed_exercise": workout_set_exercise_id, "removed_block": None}
+    raise ValueError(f"Exercise {workout_set_exercise_id} is not part of this workout")
+
+
+@tool
+def remove_block(block_id: int) -> dict:
+    """Remove a whole block (all its exercises) from a session."""
+    api().post(DELETE_BLOCK.format(block_id=block_id))
+    return {"removed_block": block_id}
+
+
+@tool
+def copy_workout(
+    program_workout_id: int,
+    to_date: str,
+    title: str | None = None,
+    team_id: int | None = None,
+) -> dict:
+    """Copy a session's plan to another date on your personal calendar.
+
+    Blocks, supersets, sets/reps/weights, cues and notes are copied; logged
+    results are not. Works for coach sessions too, as long as they are visible.
+    """
+    _, details = _fetch_details(program_workout_id, team_id)
+    plan = w.plan_from_details(details)
+    return create_workout(
+        to_date,
+        title or plan["title"] or to_date,
+        [PlannedExercise(**spec) for spec in plan["exercises"]],
+        instruction=plan["instruction"],
+    )
+
+
+@tool
+def move_workout(program_workout_id: int, to_date: str, team_id: int | None = None) -> dict:
+    """Reschedule a personal session that has no logged results yet.
+
+    TrainHeroic offers no reschedule call for personal calendars, so the session
+    is copied to `to_date` and the original deleted: its ids change.
+    """
+    _, details = _fetch_details(program_workout_id, team_id)
+    if not details.get("personal_cal"):
+        raise ValueError("Only personal sessions can be moved; use copy_workout instead")
+    if w.has_results(details):
+        raise ValueError("This session already has logged results; use copy_workout instead")
+    moved = copy_workout(program_workout_id, to_date, team_id=team_id)
+    delete_session(program_workout_id)
+    return {**moved, "moved_from_program_workout_id": program_workout_id}
 
 
 def main() -> None:

@@ -185,3 +185,36 @@ def test_new_set_exercise_is_posted_without_id():
     assert payload["workout_set_id"] == 201 and payload["order"] == 2
     assert payload["exercise_id"] == 1971 and payload["reference_max_exercise_id"] == 1971
     assert w.describe_prescription(payload) == "3 x 10 @ 25, 30, 30 kg"
+
+
+@pytest.mark.parametrize("with_template", [True, False])
+def test_plan_from_details_round_trips_targets_in_kg(with_template):
+    plan = w.plan_from_details(personal_details(with_template=with_template))
+    assert plan["title"] == "Strength 1.1" and plan["instruction"] == "Easy week"
+    deadlift, bird_dog = plan["exercises"]
+    assert deadlift["exercise_id"] == 68077 and deadlift["sets"] == 3
+    assert [float(v) for v in deadlift["weight_kg"]] == [30, 35, 40]
+    assert [int(v) for v in deadlift["reps"]] == [8, 8, 8]
+    assert deadlift["instruction"] == "ramp" and deadlift["block_title"] == "Strength/Power"
+    assert "superset" not in deadlift
+    assert bird_dog == {"exercise_id": 3870, "block_title": "Strength/Power", "sets": 1}
+
+
+def test_plan_from_details_keeps_supersets_together():
+    details = personal_details()
+    saved_blocks = details["summarizedSavedWorkout"]["saved_workout"]["workoutSets"]
+    saved_blocks[0]["workoutSetExercises"].append(saved_blocks.pop()["workoutSetExercises"][0])
+    details["workout"]["workoutSets"][0]["workoutSetExercises"].append(
+        details["workout"]["workoutSets"].pop()["workoutSetExercises"][0]
+    )
+    first, second = w.plan_from_details(details)["exercises"]
+    assert first["superset"] == second["superset"] == "block-1"
+    assert "block_title" not in second
+
+
+def test_has_results():
+    details = personal_details()
+    assert w.has_results(details) is False
+    saved = details["summarizedSavedWorkout"]["saved_workout"]
+    saved["workoutSets"][0]["workoutSetExercises"][0]["param_1_made"] = "1"
+    assert w.has_results(details) is True

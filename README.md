@@ -17,6 +17,7 @@ sets, reps, per-set weights, supersets, session notes and block instructions.
 - *"Show Tuesday's workout with links to the exercise videos."*
 - *"Bump all deadlift sets in Thursday's session by 2.5 kg."*
 - *"Find a landmine press variation that has a video."*
+- *"Copy this week's two sessions to the next three weeks, +2.5 kg on the main lifts."*
 
 ## Tools
 
@@ -32,7 +33,9 @@ sets, reps, per-set weights, supersets, session notes and block instructions.
 | Feedback | `get_workout_surveys`, `submit_survey`, `get_workout_comments`, `get_workout_leaderboard`, `save_workout_feedback` | |
 | Planning | `create_workout` | Whole session in one call, supersets included; rolls back if any step fails |
 | | `create_session`, `add_exercises`, `add_to_block`, `set_prescription` | Build or edit step by step; `add_to_block` turns a block into a superset |
-| | `update_session`, `update_block`, `delete_session` | Titles, notes, block instructions, removal |
+| | `update_session`, `update_block` | Titles, notes, block instructions |
+| | `remove_exercise`, `remove_block`, `delete_session` | Remove an exercise (an emptied block goes too), a block or a session |
+| | `copy_workout`, `move_workout` | Repeat a session's plan on another date; reschedule a session |
 
 Weights are always passed **in kilograms**; the server converts to the pounds the
 API stores and the app shows them in your preferred units. Targets can be one value
@@ -117,6 +120,9 @@ and register the script instead: `claude mcp add trainheroic -- /path/to/script.
 - Only **personal calendar** sessions can be created or edited. Coach programs are
   read-only, and once a coach license expires TrainHeroic hides those sessions from
   the API entirely (use the app's data export for that history).
+- TrainHeroic has no reschedule call for personal calendars, so `move_workout`
+  re-creates the session on the new date and deletes the old one (ids change).
+  Sessions with logged results are never moved, only copied.
 - Logging set results and marking a session complete happen in the TrainHeroic app;
   `save_workout_feedback` only stores notes, RPE and rating.
 - Reps must be whole numbers. Put "per side", tempo or rest cues in the exercise or
