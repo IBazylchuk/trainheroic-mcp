@@ -12,7 +12,7 @@ from typing import Annotated, Any, Literal
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from . import __version__
 from . import workouts as w
@@ -83,6 +83,14 @@ def _fetch_details(program_workout_id: int, team_id: int | None, program_id: int
     client.remember_team(
         details.get("program_id"), used_team, personal=bool(details.get("personal_cal"))
     )
+    if not details.get("workout") and details.get("workout_id"):
+        # The planned template is often missing from details; the editor's preview
+        # call returns it (for sessions the athlete owns).
+        try:
+            details["workout"] = client.get(f"/2.0/coach/preview/workout/{details['workout_id']}")
+        except TrainHeroicError as e:
+            if e.status_code not in (401, 403, 404):
+                raise
     return used_team, details
 
 
@@ -427,7 +435,9 @@ def set_prescription(
     """Set sets and per-set targets for one exercise of a session you own.
 
     Each target is one value for all sets or a list with one value per set, e.g.
-    sets=4, reps=8, weight_kg=[30, 35, 40, 40]. Reps are whole numbers; write
+    sets=4, reps=8, weight_kg=[30, 35, 40, 40]. Targets and the set count you leave
+    out keep their planned values, so weight_kg=42.5 alone only changes weights.
+    Reps are whole numbers; write
     "per side" or tempo cues in `instruction`. Only targets the exercise tracks
     are accepted (see `tracks` in get_workout).
     """
@@ -557,6 +567,15 @@ class PlannedExercise(BaseModel):
         default=None, description='e.g. "Warm-up", "Main lift"; defaults to the superset label'
     )
     block_instruction: str | None = None
+
+    @model_validator(mode="after")
+    def _explicit_set_count(self) -> PlannedExercise:
+        targets = self.targets()
+        if targets and self.sets is None and not any(isinstance(v, list) for v in targets.values()):
+            raise ValueError(
+                f"exercise {self.exercise_id}: give `sets` when targets are single values"
+            )
+        return self
 
     def targets(self) -> dict[str, PerSet]:
         return {

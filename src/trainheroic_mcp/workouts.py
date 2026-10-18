@@ -277,7 +277,7 @@ def describe_set_exercise(details: dict, workout_set_exercise_id: int) -> dict:
 
 
 def _human_values(ex: dict, slot: int, ptype: ParamType, metric: bool) -> list[Any]:
-    """Per-set values of one parameter in the units the planning tools take."""
+    """Per-set planned values of one parameter in the units the planning tools take."""
     source, in_lb = (ex["template"], True) if ex["template"] else (ex["saved"], not metric)
     count = min(to_int(ex.get("param_count")) or 0, MAX_SETS)
     values = []
@@ -292,10 +292,11 @@ def _human_values(ex: dict, slot: int, ptype: ParamType, metric: bool) -> list[A
 def plan_from_details(details: dict) -> dict:
     """The session as ``create_workout`` arguments: blocks, supersets, targets, notes.
 
-    Targets come from the coach/planner template when the API returns it, otherwise
-    from the athlete's copy (which holds logged values once sets are done).
+    Targets come from the planned template. Without it they come from the athlete's
+    copy, which is only safe before anything is logged (it then holds results).
     """
     metric = str(_saved_root(details).get("use_metric")) == "1"
+    logged = has_results(details)
     exercises: list[dict] = []
     for index, block in enumerate(blocks(details), start=1):
         superset = f"block-{index}" if len(block["exercises"]) > 1 else None
@@ -310,6 +311,12 @@ def plan_from_details(details: dict) -> dict:
                 if block["instruction"]:
                     spec["block_instruction"] = block["instruction"]
             if not _done(ex.get("no_sets")):
+                if logged and not ex["template"]:
+                    # The athlete's copy now holds what was done, not what was planned.
+                    raise ValueError(
+                        f"The plan for {ex['title']} is not available and the session has "
+                        "logged results; copying would turn them into targets"
+                    )
                 spec["sets"] = to_int(ex.get("param_count")) or 1
                 for slot in (1, 2):
                     ptype = ParamType.parse(ex.get(f"param_{slot}_type"))
@@ -403,13 +410,14 @@ def _as_list(values: Values, sets: int) -> list[Value]:
     return values
 
 
-def resolve_set_count(sets: int | None, inputs: dict[str, Values]) -> int:
+def resolve_set_count(sets: int | None, inputs: dict[str, Values], default: int = 1) -> int:
+    """Explicit ``sets`` wins, then the length of per-set lists, then ``default``."""
     lengths = {
         len(v) for v in inputs.values() if v is not None and not isinstance(v, (str, int, float))
     }
     if len(lengths) > 1:
         raise ValueError(f"Per-set lists have different lengths: {sorted(lengths)}")
-    count = sets or (lengths.pop() if lengths else 1)
+    count = sets or (lengths.pop() if lengths else default)
     if not 1 <= count <= MAX_SETS:
         raise ValueError(f"TrainHeroic supports 1-{MAX_SETS} sets, got {count}")
     return count
@@ -442,7 +450,10 @@ def build_prescription(
             f"cannot set {', '.join(sorted(unknown))}"
         )
 
-    count = resolve_set_count(sets, provided)
+    # Raw planned values (API units) live in the template of a normalized exercise,
+    # or directly in a raw set-exercise payload.
+    planned = current.get("template", current)
+    count = resolve_set_count(sets, provided, default=to_int(planned.get("param_count")) or 1)
     payload = {k: current.get(k) for k in SET_EXERCISE_FIELDS}
     if payload["id"] is None:
         del payload["id"]  # posting without an id adds the exercise to the block
@@ -454,15 +465,29 @@ def build_prescription(
 
     for slot, ptype in enumerate(types, start=1):
         key = INPUT_FOR_TYPE.get(ptype)
-        values = _as_list(provided.get(key) if key else None, count)
-        for value in values:
-            _check_value(ptype, value, key or "")
-        if ptype is ParamType.WEIGHT:
-            values = [kg_to_lb(float(v)) if v != "" else "" for v in values]
+        if key not in provided:
+            # Not being changed: keep the planned values, stretched to the new set count.
+            values = _keep_planned(planned, slot, count)
+        else:
+            values = _as_list(provided[key], count)
+            for value in values:
+                _check_value(ptype, value, key)
+            if ptype is ParamType.WEIGHT:
+                values = [kg_to_lb(float(v)) if v != "" else "" for v in values]
         for i in range(1, MAX_SETS + 1):
             value = values[i - 1] if i <= count else ""
             payload[f"param_{slot}_data_{i}"] = format_number(value) if value != "" else ""
     return payload
+
+
+def _keep_planned(planned: dict, slot: int, count: int) -> list[Value]:
+    previous = [
+        _clean(planned.get(f"param_{slot}_data_{i}")) or ""
+        for i in range(1, min(to_int(planned.get("param_count")) or 0, MAX_SETS) + 1)
+    ]
+    if not any(previous):
+        return [""] * count
+    return (previous + [previous[-1]] * count)[:count]
 
 
 _RANGE = re.compile(r"^\d+(\.\d+)?\s*-\s*\d+(\.\d+)?$")

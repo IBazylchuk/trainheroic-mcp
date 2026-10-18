@@ -218,3 +218,44 @@ def test_has_results():
     saved = details["summarizedSavedWorkout"]["saved_workout"]
     saved["workoutSets"][0]["workoutSetExercises"][0]["param_1_made"] = "1"
     assert w.has_results(details) is True
+
+
+class TestKeepPlannedTargets:
+    def test_changing_weight_keeps_reps_and_set_count(self):
+        ex = w.find_set_exercise(personal_details(), 101)
+        p = w.build_prescription(ex, weight_kg=[40, 42.5, 45])
+        assert [p[f"param_1_data_{i}"] for i in (1, 2, 3)] == ["8", "8", "8"]
+        assert p["param_count"] == 3
+
+    def test_more_sets_repeat_the_last_planned_value(self):
+        ex = w.find_set_exercise(personal_details(), 101)
+        p = w.build_prescription(ex, sets=4)
+        assert [p[f"param_2_data_{i}"] for i in (1, 2, 3, 4)] == [
+            "66.14",
+            "77.16",
+            "88.18",
+            "88.18",
+        ]
+
+    def test_without_template_unchanged_targets_are_left_blank(self):
+        ex = w.find_set_exercise(personal_details(with_template=False), 101)
+        p = w.build_prescription(ex, sets=3, weight_kg=40)
+        assert p["param_1_data_1"] == ""  # the saved copy is never trusted as a plan
+
+
+def test_copy_refuses_logged_session_without_plan():
+    details = personal_details(with_template=False)
+    saved = details["summarizedSavedWorkout"]["saved_workout"]
+    saved["workoutSets"][0]["workoutSetExercises"][0]["param_1_made"] = "1"
+    with pytest.raises(ValueError, match="logged results"):
+        w.plan_from_details(details)
+
+
+def test_copy_of_logged_session_uses_the_plan_not_the_results():
+    details = personal_details()
+    saved_ex = details["summarizedSavedWorkout"]["saved_workout"]["workoutSets"][0][
+        "workoutSetExercises"
+    ][0]
+    saved_ex.update({"param_1_made": "1", "param_2_data_1": "50", "completed": "1"})
+    deadlift = w.plan_from_details(details)["exercises"][0]
+    assert [float(v) for v in deadlift["weight_kg"]] == [30, 35, 40]

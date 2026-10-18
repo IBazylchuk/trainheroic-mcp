@@ -237,7 +237,7 @@ def test_create_workout_rolls_back_on_failure(tools, httpx_mock):
         tools.create_workout(
             "2026-10-21",
             "Strength 1.1",
-            [tools.PlannedExercise(exercise_id=68077, reps=8, weight_kg=30)],
+            [tools.PlannedExercise(exercise_id=68077, sets=1, reps=8, weight_kg=30)],
         )
     assert httpx_mock.get_requests(method="DELETE")
 
@@ -298,7 +298,7 @@ def test_create_workout_groups_supersets_into_one_block(tools, httpx_mock):
         "2026-10-21",
         "Strength 1.1",
         [
-            tools.PlannedExercise(exercise_id=68077, reps=8, weight_kg=30, superset="A"),
+            tools.PlannedExercise(exercise_id=68077, sets=1, reps=8, weight_kg=30, superset="A"),
             tools.PlannedExercise(exercise_id=3870, sets=2, reps=8),
             tools.PlannedExercise(exercise_id=1971, reps=10, weight_kg=[25, 30, 30], superset="A"),
         ],
@@ -368,6 +368,7 @@ def test_remove_exercise_from_superset_deletes_only_that_exercise(tools, httpx_m
     del details["workout"]
     client.remember_team(PERSONAL_PROGRAM, PERSONAL_TEAM, personal=True)
     _details_mock(httpx_mock, details)
+    httpx_mock.add_response(url=url("/2.0/coach/preview/workout/20"), status_code=404)
     httpx_mock.add_response(
         method="DELETE",
         url=url("/2.0/coach/calendar/workout/workoutSetExercise/201/102"),
@@ -419,3 +420,30 @@ def test_copy_workout_recreates_plan(tools, httpx_mock, client):
         httpx_mock.get_requests(url=url("/2.0/coach/calendar/saveWorkoutSetExercises"))[0].content
     )[0]
     assert [lift[f"param_2_data_{i}"] for i in (1, 2, 3)] == ["66.14", "77.16", "88.18"]
+
+
+def test_set_prescription_reads_plan_from_preview_and_keeps_other_targets(tools, httpx_mock):
+    details = personal_details()
+    template = details.pop("workout")
+    httpx_mock.add_response(url=url(f"/v5/programWorkouts/10/teams/{PERSONAL_TEAM}"), json=details)
+    httpx_mock.add_response(url=url("/2.0/coach/preview/workout/20"), json=template)
+    httpx_mock.add_response(
+        method="POST", url=url("/2.0/coach/calendar/saveWorkoutSetExercises"), json=[{}]
+    )
+
+    out = tools.set_prescription(10, 101, weight_kg=42.5, team_id=PERSONAL_TEAM)
+
+    body = json.loads(
+        httpx_mock.get_requests(url=url("/2.0/coach/calendar/saveWorkoutSetExercises"))[0].content
+    )[0]
+    assert body["param_count"] == 3  # planned set count kept
+    assert [body[f"param_1_data_{i}"] for i in (1, 2, 3)] == ["8", "8", "8"]  # reps kept
+    assert [body[f"param_2_data_{i}"] for i in (1, 2, 3)] == ["93.7"] * 3
+    assert out["prescribed"] == "3 x 8 @ 42.5 kg"
+
+
+def test_planned_exercise_needs_sets_for_single_values(tools):
+    with pytest.raises(ValueError, match="give `sets`"):
+        tools.PlannedExercise(exercise_id=1971, reps=10, weight_kg=25)
+    assert tools.PlannedExercise(exercise_id=1971, reps=10, weight_kg=[25, 30]).sets is None
+    assert tools.PlannedExercise(exercise_id=1, block_title="Warm-up").sets is None
