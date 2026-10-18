@@ -708,15 +708,24 @@ def copy_workout(
 
     Blocks, supersets, sets/reps/weights, cues and notes are copied; logged
     results are not. Works for coach sessions too, as long as they are visible.
+    For personal sessions the app writes values typed while logging back into the
+    plan, so a logged personal session copies those values (the result says so).
     """
     _, details = _fetch_details(program_workout_id, team_id)
     plan = w.plan_from_details(details)
-    return create_workout(
+    copied = create_workout(
         to_date,
         title or plan["title"] or to_date,
         [PlannedExercise(**spec) for spec in plan["exercises"]],
         instruction=plan["instruction"],
     )
+    if details.get("personal_cal") and w.has_results(details):
+        copied["note"] = (
+            "The source is a logged personal session. TrainHeroic overwrites the plan of "
+            "personal sessions with values entered in the app, so the copy carries those "
+            "values, not necessarily the original targets. Check it with get_workout."
+        )
+    return copied
 
 
 @tool

@@ -411,7 +411,8 @@ def test_copy_workout_recreates_plan(tools, httpx_mock, client):
     httpx_mock.add_response(
         method="POST", url=re.compile(r".*/workoutSet/save/\d+$"), json={}, is_reusable=True
     )
-    tools.copy_workout(10, "2026-10-28")
+    out = tools.copy_workout(10, "2026-10-28")
+    assert "note" not in out
     created = json.loads(
         httpx_mock.get_requests(method="POST", url=url("/v5/programWorkouts/personal"))[0].content
     )
@@ -420,6 +421,25 @@ def test_copy_workout_recreates_plan(tools, httpx_mock, client):
         httpx_mock.get_requests(url=url("/2.0/coach/calendar/saveWorkoutSetExercises"))[0].content
     )[0]
     assert [lift[f"param_2_data_{i}"] for i in (1, 2, 3)] == ["66.14", "77.16", "88.18"]
+
+
+def test_copy_of_logged_personal_session_warns_plan_was_overwritten(tools, httpx_mock, client):
+    details = personal_details()
+    details["summarizedSavedWorkout"]["saved_workout"]["completed"] = "1"
+    client.remember_team(PERSONAL_PROGRAM, PERSONAL_TEAM, personal=True)
+    _details_mock(httpx_mock, details, reusable=True)
+    _mock_create(httpx_mock)
+    httpx_mock.add_response(
+        method="POST",
+        url=url("/2.0/coach/calendar/saveWorkoutSetExercises"),
+        json=[{}],
+        is_reusable=True,
+    )
+    httpx_mock.add_response(
+        method="POST", url=re.compile(r".*/workoutSet/save/\d+$"), json={}, is_reusable=True
+    )
+    out = tools.copy_workout(10, "2026-10-28")
+    assert "overwrites the plan" in out["note"]
 
 
 def test_set_prescription_reads_plan_from_preview_and_keeps_other_targets(tools, httpx_mock):

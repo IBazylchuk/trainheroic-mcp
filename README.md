@@ -123,6 +123,10 @@ and register the script instead: `claude mcp add trainheroic -- /path/to/script.
 - TrainHeroic has no reschedule call for personal calendars, so `move_workout`
   re-creates the session on the new date and deletes the old one (ids change).
   Sessions with logged results are never moved, only copied.
+- For personal sessions the TrainHeroic app writes the reps and weights you type while
+  logging back into the plan; the original targets are not kept anywhere. Copying a
+  logged personal session therefore repeats what you entered, and `copy_workout` says
+  so in its result.
 - Logging set results and marking a session complete happen in the TrainHeroic app;
   `save_workout_feedback` only stores notes, RPE and rating.
 - Reps must be whole numbers. Put "per side", tempo or rest cues in the exercise or
